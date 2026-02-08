@@ -7,6 +7,7 @@ import torchaudio.pipelines as pipelines
 from typing import Optional, List, Tuple, Dict
 from safetensors.torch import load_file
 import os
+import numpy as np
 
 def ensure_weights_path(idx: str = None):
     """

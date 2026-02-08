@@ -18,6 +18,7 @@ import torch.nn as nn
 from typing import Tuple, List
 import os
 import sys
+import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 
 import soundfile as sf

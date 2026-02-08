@@ -458,7 +458,8 @@ class StandaloneEncoder(nn.Module):
         sr: int = 24000,
         enforce_token_count: bool = True,
         safety_dur: float = 0.3,
-        durations: Optional[torch.Tensor] = None
+        durations: Optional[torch.Tensor] = None,
+        use_amp: bool = True
     ) -> Tuple[Union[torch.Tensor, List[torch.Tensor]], Union[torch.Tensor, List[torch.Tensor]]]:
         """
         Encode audio to tokens and global embedding.

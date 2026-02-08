@@ -41,7 +41,8 @@ class OptimizedStandaloneEncoder(nn.Module):
         compile_mode: str = "max-autotune",  # "default", "reduce-overhead", "max-autotune"
         use_compile: bool = True,
         dtype: torch.dtype = torch.float16,
-        use_cudagraphs: bool = False
+        use_cudagraphs: bool = False,
+        dynamic_shapes: bool = True
     ):
         super().__init__()
         self.device = device
@@ -49,6 +50,7 @@ class OptimizedStandaloneEncoder(nn.Module):
         self.use_compile = use_compile
         self.use_cudagraphs = use_cudagraphs
         self.compile_mode = compile_mode
+        self.dynamic_shapes = dynamic_shapes
         
         # Core components (will be initialized on weight load)
         self.local_encoder = None
@@ -135,6 +137,7 @@ class OptimizedStandaloneEncoder(nn.Module):
         self._compiled_encoder = torch.compile(
             self.local_encoder,
             mode=self.compile_mode,
+            dynamic=self.dynamic_shapes,
             fullgraph=True
         )
         
@@ -168,6 +171,7 @@ class OptimizedStandaloneEncoder(nn.Module):
             self._compiled_ssl = torch.compile(
                 self.ssl_model.extract_features,
                 mode=self.compile_mode,
+                dynamic=self.dynamic_shapes,
                 fullgraph=False  # WavLM has dynamic control flow
             )
             print("[+] WavLM compiled successfully")
@@ -335,7 +339,8 @@ def create_optimized_encoder(
     device: str = "cuda",
     compile_mode: str = "max-autotune",
     dtype: torch.dtype = torch.float16,
-    warmup: bool = True
+    warmup: bool = True,
+    dynamic_shapes: bool = True
 ) -> OptimizedStandaloneEncoder:
     """
     Factory function to create and initialize optimized encoder.
@@ -346,6 +351,7 @@ def create_optimized_encoder(
         compile_mode: torch.compile mode ("default", "reduce-overhead", "max-autotune")
         dtype: Data type for inference
         warmup: Run warmup iterations
+        dynamic_shapes: Whether to allow dynamic sequence lengths without re-compilation
         
     Returns:
         Initialized encoder
@@ -356,7 +362,8 @@ def create_optimized_encoder(
         device=device,
         compile_mode=compile_mode,
         use_compile=torch.cuda.is_available(),
-        dtype=dtype
+        dtype=dtype,
+        dynamic_shapes=dynamic_shapes
     )
     
     encoder.load_weights(weights_path)

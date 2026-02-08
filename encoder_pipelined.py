@@ -11,8 +11,9 @@ This maximizes GPU utilization by keeping both models busy simultaneously.
 
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from queue import Queue
+from contextlib import nullcontext
 import numpy as np
 from threading import Thread
 import soundfile as sf
@@ -75,17 +76,19 @@ class PipelinedEncoder:
         print("[*] Warming up pipelined encoder (both stages)...")
         
         # Create dummy batches
-        dummy_audio = torch.randn(2, 24000 * 5).to(self.device)  # 2 samples, 5s each
+        dummy_audio = torch.randn(2, 24000 * 5).to(self.device).to(self.dtype)
         dummy_sr = 24000
+        
+        amp_ctx = torch.autocast(device_type='cuda', dtype=self.dtype) if torch.cuda.is_available() else nullcontext()
         
         for i in range(num_iterations):
             # Warmup WavLM
-            with torch.cuda.stream(self.stream_wavlm) if self.stream_wavlm else torch.no_grad():
+            with torch.cuda.stream(self.stream_wavlm) if self.stream_wavlm else torch.no_grad(), amp_ctx:
                 waveform_ssl = self._resample_for_ssl(dummy_audio, dummy_sr)
                 all_ssl, _ = self.encoder.ssl_model.extract_features(waveform_ssl)
             
             # Warmup Encoder
-            with torch.cuda.stream(self.stream_encoder) if self.stream_encoder else torch.no_grad():
+            with torch.cuda.stream(self.stream_encoder) if self.stream_encoder else torch.no_grad(), amp_ctx:
                 local_ssl = self.encoder._process_ssl_features(all_ssl, [6, 9])
                 local_ssl = self.encoder._normalize_ssl_features(local_ssl)
                 
@@ -100,15 +103,15 @@ class PipelinedEncoder:
         print("[+] Warmup complete (both stages)")
     
     def _resample_for_ssl(self, waveform: torch.Tensor, sr: int) -> torch.Tensor:
-        """Resample audio to 16kHz for SSL model."""
+        """Resample audio to 16kHz for SSL model and ensure correct dtype."""
         target_sr = 16000
         if sr != target_sr:
             if self.encoder._resampler is None or self.encoder._resampler_sr != sr:
                 import torchaudio
                 self.encoder._resampler = torchaudio.transforms.Resample(sr, target_sr).to(self.device)
                 self.encoder._resampler_sr = sr
-            return self.encoder._resampler(waveform)
-        return waveform
+            return self.encoder._resampler(waveform).to(self.dtype)
+        return waveform.to(self.dtype)
     
     @torch.inference_mode()
     def encode_batch_pipelined(
@@ -149,10 +152,11 @@ class PipelinedEncoder:
         
         # Pipeline state
         ssl_features_queue = []
+        amp_ctx = torch.autocast(device_type='cuda', dtype=self.dtype) if torch.cuda.is_available() else nullcontext()
         
         for batch_idx, (batch_indices, padded_batch) in enumerate(batches):
             # Stage 1: WavLM feature extraction (Stream 1)
-            with torch.cuda.stream(self.stream_wavlm):
+            with torch.cuda.stream(self.stream_wavlm), amp_ctx:
                 waveform_ssl = self._resample_for_ssl(padded_batch, sr)
                 
                 if self.encoder._compiled_ssl:
@@ -171,12 +175,12 @@ class PipelinedEncoder:
             # Stage 2: Encoder processing (Stream 2)
             # Process previous batch while WavLM is working on current batch
             if len(ssl_features_queue) > 1:
-                self._process_encoder_stage(ssl_features_queue[0], results)
+                self._process_encoder_stage(ssl_features_queue[0], results, amp_ctx)
                 ssl_features_queue.pop(0)
         
         # Process remaining batches in queue
         for ssl_features in ssl_features_queue:
-            self._process_encoder_stage(ssl_features, results)
+            self._process_encoder_stage(ssl_features, results, amp_ctx)
         
         # Synchronize all streams
         torch.cuda.synchronize()
@@ -186,12 +190,13 @@ class PipelinedEncoder:
     def _process_encoder_stage(
         self,
         ssl_features_data: Tuple,
-        results: List
+        results: List,
+        amp_ctx: object # Pass amp_ctx from encode_batch_pipelined
     ):
         """Process encoder stage on Stream 2."""
         batch_idx, batch_indices, local_ssl, global_ssl = ssl_features_data
         
-        with torch.cuda.stream(self.stream_encoder):
+        with torch.cuda.stream(self.stream_encoder), amp_ctx:
             # Encode through transformer
             if self.encoder._compiled_encoder:
                 encoded = self.encoder._compiled_encoder(local_ssl)

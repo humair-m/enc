@@ -324,7 +324,7 @@ class StandaloneEncoder(nn.Module):
         
         self.local_encoder = Transformer(dim=768, n_layers=6, n_heads=12, window_size=125)
         self.local_quantizer = FiniteScalarQuantizer(input_dim=768, output_dim=768, levels=[8, 8, 8, 5, 5])
-        self.global_encoder = GlobalEncoder(input_channels=768, output_channels=128, dim=384, intermediate_dim=1152, num_layers=4)
+        self.global_encoder = GlobalEncoder(input_channels=768, output_channels=128, dim=384, intermediate_dim=1152, num_layers=2)
         
         # 25hz_clean downsample factor is 2
         self.conv_downsample = nn.Conv1d(768, 768, kernel_size=2, stride=2)

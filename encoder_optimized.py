@@ -93,7 +93,7 @@ class OptimizedStandaloneEncoder(nn.Module):
         ).to(self.device).to(self.dtype)
         self.global_encoder = GlobalEncoder(
             input_channels=768, output_channels=128, 
-            dim=512, intermediate_dim=512, num_layers=2
+            dim=384, intermediate_dim=1152, num_layers=2
         ).to(self.device).to(self.dtype)
         self.conv_downsample = nn.Conv1d(768, 768, kernel_size=2, stride=2).to(self.device).to(self.dtype)
         

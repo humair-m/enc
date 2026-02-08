@@ -30,7 +30,7 @@ pip install -e .
 
 ## 🛠 Usage
 
-### 1. Putting Audio (Inputs)
+### 1. Audio Inputs
 The `encode` method is flexible and accepts multiple input formats:
 
 - **File Path**: Just pass the string path to your `.wav` file.
@@ -68,13 +68,31 @@ encoder = create_optimized_encoder(
 tokens, style_emb = encoder.encode(waveform, sr=24000)
 ```
 
+### Batch Processing (Pipelined)
+
+For processing multiple files efficiently, use the `PipelinedEncoder`. It overlaps WavLM feature extraction with encoder processing using CUDA streams.
+
+```python
+from enc import create_pipelined_encoder
+
+encoder = create_pipelined_encoder(device="cuda")
+
+# Supports list of file paths or tensors
+files = ["test1.wav", "test2.wav", "test3.wav"]
+results = encoder.encode_batch_pipelined(files, sr=24000, batch_size=4)
+
+for tokens, style_emb in results:
+    print(tokens.shape)
+```
+
 ### Long Audio Processing
 
 ```python
 from enc import create_long_audio_encoder
 
 encoder = create_long_audio_encoder(device="cuda")
-tokens, style_emb = encoder.encode_long(waveform, sr=24000)
+# Automatically handles chunking and overlap for long files
+tokens, style_emb = encoder.encode("extremely_long_audio.wav")
 ```
 
 ## 📊 Precision & Performance

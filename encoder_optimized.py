@@ -152,7 +152,9 @@ class OptimizedStandaloneEncoder(nn.Module):
         
         if wavlm_path:
             print(f"[*] Loading WavLM weights from {wavlm_path}")
-            self.ssl_model = bundle.get_model().to(self.device)
+            # Initialize model structure directly to skip download
+            from torchaudio.models import wavlm_base
+            self.ssl_model = wavlm_base(**bundle._params).to(self.device)
             state_dict = load_file(wavlm_path)
             self.ssl_model.load_state_dict(state_dict)
         else:

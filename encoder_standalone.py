@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 import torchaudio.pipelines as pipelines
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Union, Any
 from safetensors.torch import load_file
 import os
 import numpy as np

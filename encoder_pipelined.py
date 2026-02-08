@@ -37,7 +37,7 @@ class PipelinedEncoder:
     
     def __init__(
         self,
-        weights_path: str = "encoder.safetensors",
+        weights_path: Optional[str] = None,
         device: str = "cuda",
         compile_mode: str = "max-autotune",
         dtype: torch.dtype = torch.float16,
@@ -259,7 +259,7 @@ class PipelinedEncoder:
 
 
 def create_pipelined_encoder(
-    weights_path: str = "encoder.safetensors",
+    weights_path: Optional[str] = None,
     device: str = "cuda",
     compile_mode: str = "max-autotune",
     dtype: torch.dtype = torch.float16,

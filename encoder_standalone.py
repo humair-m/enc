@@ -412,8 +412,18 @@ class StandaloneEncoder(nn.Module):
         std = torch.std(features, dim=1, keepdim=True)   # (B, 1, C)
         return (features - mean) / (std + eps)
 
-    def _resolve_audio(self, waveform: Union[torch.Tensor, np.ndarray, str, bytes], sr: int) -> Tuple[torch.Tensor, int]:
-        """Resolve various audio input types to a torch Tensor."""
+    def _resolve_audio(self, waveform: Union[torch.Tensor, np.ndarray, str, bytes, List[Any]], sr: int) -> Tuple[torch.Tensor, int, torch.Tensor]:
+        """Resolve various audio input types to a torch Tensor (Batch, Time) and a Tensor of durations."""
+        if isinstance(waveform, list):
+            # If it's a list, we assume they are already resolved or need resolving individually
+            # This is handled by high-level encode_batch, but for standard encode we might get a list
+            # We'll just convert everything in the list to tensors and pad
+            resolved = [self._resolve_audio(w, sr)[0] for w in waveform]
+            durations = torch.tensor([w.shape[-1] / sr for w in resolved])
+            max_len = max(w.shape[-1] for w in resolved)
+            padded = torch.stack([F.pad(w, (0, max_len - w.shape[-1])) for w in resolved]).squeeze(1)
+            return padded, sr, durations
+
         if isinstance(waveform, bytes):
             import io
             import soundfile as sf
@@ -431,19 +441,25 @@ class StandaloneEncoder(nn.Module):
             waveform = waveform.view(-1, waveform.shape[-1])
             
         # Convert to mono if multi-channel
-        if waveform.shape[0] > 1:
+        if waveform.shape[0] > 1 and not isinstance(waveform, torch.Tensor): 
+            # This logic is slightly flawed for batches, but for single audio:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        elif waveform.dim() == 2 and waveform.shape[0] > 1 and waveform.shape[0] <= 2:
+            # Likely stereo
             waveform = waveform.mean(dim=0, keepdim=True)
             
-        return waveform, sr
+        durations = torch.tensor([waveform.shape[-1] / sr] * waveform.shape[0])
+        return waveform, sr, durations
 
     @torch.inference_mode()
     def encode(
         self, 
-        waveform: Union[torch.Tensor, np.ndarray, str, bytes], 
+        waveform: Union[torch.Tensor, np.ndarray, str, bytes, List[Any]], 
         sr: int = 24000,
         enforce_token_count: bool = True,
-        safety_dur: float = 0.3
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        safety_dur: float = 0.3,
+        durations: Optional[torch.Tensor] = None
+    ) -> Tuple[Union[torch.Tensor, List[torch.Tensor]], Union[torch.Tensor, List[torch.Tensor]]]:
         """
         Encode audio to tokens and global embedding.
         
@@ -452,17 +468,22 @@ class StandaloneEncoder(nn.Module):
             sr: Sample rate
             enforce_token_count: If True, truncate tokens to expected count based on duration
             safety_dur: Safety margin in seconds when enforcing token count (default: 0.3s)
+            durations: Optional tensor of original durations for each sample in batch
             
         Returns:
-            (tokens, global_embedding)
+            (tokens, global_embedding) - Tensors (or lists of tensors if batch)
         """
         self.ensure_ssl_extractor()
         
         # Resolve audio to tensor
-        waveform, sr = self._resolve_audio(waveform, sr)
+        waveform, sr, resolved_durations = self._resolve_audio(waveform, sr)
+        if durations is None:
+            durations = resolved_durations
         
-        # Calculate audio duration for token enforcement
-        audio_duration = waveform.shape[-1] / sr
+        # Move to device
+        waveform = waveform.to(self.device)
+        durations = durations.to(self.device)
+        is_batch = waveform.shape[0] > 1
         
         # 1. Resample to 16kHz (SSL model requirement)
         target_sr = 16000
@@ -494,15 +515,29 @@ class StandaloneEncoder(nn.Module):
         local_downsampled = self.conv_downsample(local_encoded.transpose(1, 2)).transpose(1, 2)
         _, indices = self.local_quantizer.encode(local_downsampled)
         
-        indices = indices.squeeze(0)
+        indices = indices.squeeze(1) # [B, T]
         
-        # 5. Enforce token count to prevent silence artifacts
+        # 5. Enforce token count to prevent silence artifacts (Per sample in batch)
         if enforce_token_count:
-            expected_tokens = int((audio_duration + safety_dur) * 25)  # 25 tokens/sec
-            if len(indices) > expected_tokens:
-                indices = indices[:expected_tokens]
+            final_indices = []
+            for b in range(indices.shape[0]):
+                expected_tokens = int((durations[b].item() + safety_dur) * 25)
+                sample_indices = indices[b]
+                if len(sample_indices) > expected_tokens:
+                    sample_indices = sample_indices[:expected_tokens]
+                final_indices.append(sample_indices)
+            
+            # If batch, return list to allow different lengths
+            if is_batch:
+                return final_indices, global_emb
+            else:
+                return final_indices[0], global_emb.squeeze(0)
         
-        return indices, global_emb
+        if is_batch:
+            # Convert [B, T] to list of tensors to match variable length expectations
+            return [indices[b] for b in range(indices.shape[0])], global_emb
+            
+        return indices.squeeze(0), global_emb.squeeze(0)
 
 def create_standalone_encoder(
     weights_path: str = None,

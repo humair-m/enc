@@ -186,35 +186,36 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
     @torch.inference_mode()
     def encode(
         self, 
-        waveform: torch.Tensor, 
+        waveform: Union[torch.Tensor, np.ndarray, str, bytes, List[Any]], 
         sr: int = 24000,
-        use_amp: bool = True,
         enforce_token_count: bool = True,
-        safety_dur: float = 0.3
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        safety_dur: float = 0.3,
+        durations: Optional[torch.Tensor] = None
+    ) -> Tuple[Union[torch.Tensor, List[torch.Tensor]], Union[torch.Tensor, List[torch.Tensor]]]:
         """
         Encode audio to tokens and global embedding.
         
         Args:
-            waveform: Audio tensor (samples,) or (batch, samples)
+            waveform: Audio tensor (samples,), (batch, samples), path, numpy array, or bytes
             sr: Sample rate
-            use_amp: Use automatic mixed precision
             enforce_token_count: If True, truncate tokens to expected count based on duration
             safety_dur: Safety margin in seconds when enforcing token count (default: 0.3s)
+            durations: Optional tensor of original durations for each sample in batch
             
         Returns:
-            (tokens, global_embedding)
+            (tokens, global_embedding) - Tensors (or lists of tensors if batch)
         """
         self.ensure_ssl_extractor()
         
         # Resolve audio to tensor
-        waveform, sr = self._resolve_audio(waveform, sr)
-        
-        # Calculate audio duration for token enforcement
-        audio_duration = waveform.shape[-1] / sr
-        
+        waveform, sr, resolved_durations = self._resolve_audio(waveform, sr)
+        if durations is None:
+            durations = resolved_durations
+            
         # Move to device
-        waveform = waveform.to(self.device)
+        waveform = waveform.to(self.device).to(self.dtype)
+        durations = durations.to(self.device)
+        is_batch = waveform.shape[0] > 1
         
         # Resample to 16kHz for SSL
         target_sr = 16000
@@ -257,16 +258,29 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             # Global embedding
             global_emb = self.global_encoder(global_ssl)
             
-        indices = indices.squeeze(0)
-        global_emb = global_emb.squeeze(0)
+        indices = indices.squeeze(1) # [B, T]
         
-        # Enforce token count to prevent silence artifacts
+        # 5. Enforce token count to prevent silence artifacts (Per sample in batch)
         if enforce_token_count:
-            expected_tokens = int((audio_duration + safety_dur) * 25)  # 25 tokens/sec
-            if len(indices) > expected_tokens:
-                indices = indices[:expected_tokens]
+            final_indices = []
+            for b in range(indices.shape[0]):
+                expected_tokens = int((durations[b].item() + safety_dur) * 25)
+                sample_indices = indices[b]
+                if len(sample_indices) > expected_tokens:
+                    sample_indices = sample_indices[:expected_tokens]
+                final_indices.append(sample_indices)
+            
+            # If batch, return list to allow different lengths
+            if is_batch:
+                return final_indices, global_emb
+            else:
+                return final_indices[0], global_emb.squeeze(0)
         
-        return indices, global_emb
+        if is_batch:
+            # Convert [B, T] to list of tensors to match variable length expectations
+            return [indices[b] for b in range(indices.shape[0])], global_emb
+            
+        return indices.squeeze(0), global_emb.squeeze(0)
     
     @torch.inference_mode()
     def encode_batch(
@@ -290,28 +304,35 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         """
         # Resolve all inputs to tensors first
         resolved_waveforms = []
+        original_durations = []
         for w in waveforms:
             # We don't resample yet, just resolve to tensors
-            wav, _ = self._resolve_audio(w, sr)
+            wav, _, dur = self._resolve_audio(w, sr)
             resolved_waveforms.append(wav.squeeze(0))
-        
+            original_durations.append(dur[0])
+            
         # Group by similar lengths for efficient batching
-        sorted_wavs = sorted(enumerate(resolved_waveforms), key=lambda x: x[1].shape[-1])
+        # We store (index, waveform, duration)
+        indexed_data = list(zip(range(len(resolved_waveforms)), resolved_waveforms, original_durations))
+        sorted_wavs = sorted(indexed_data, key=lambda x: x[1].shape[-1])
         
         results = [None] * len(waveforms)
         
         for i in range(0, len(sorted_wavs), batch_size):
             batch = sorted_wavs[i:i+batch_size]
-            indices_list, original_indices = zip(*batch)
+            original_indices, batch_wavs, batch_durs = zip(*batch)
             
             # Pad to same length
-            max_len = max(w.shape[-1] for w in indices_list)
+            max_len = max(w.shape[-1] for w in batch_wavs)
             padded = torch.stack([
-                F.pad(w, (0, max_len - w.shape[-1])) for w in indices_list
+                F.pad(w, (0, max_len - w.shape[-1])) for w in batch_wavs
             ])
             
+            # Convert durations to a tensor
+            dur_tensor = torch.stack(batch_durs)
+            
             # Encode batch
-            tokens_batch, global_batch = self.encode(padded, sr=sr, use_amp=use_amp)
+            tokens_batch, global_batch = self.encode(padded, sr=sr, use_amp=use_amp, durations=dur_tensor)
             
             # Store results
             for j, orig_idx in enumerate(original_indices):

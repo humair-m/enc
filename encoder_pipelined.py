@@ -131,15 +131,15 @@ class PipelinedEncoder:
         Returns:
             List of (tokens, global_embedding) tuples
         """
-        # Resolve paths if provided
+        # Resolve paths/bytes if provided
         processed_waveforms = []
+        original_durations = []
         for w in waveforms:
-            if isinstance(w, str):
-                import torchaudio
-                wav, _ = torchaudio.load(w)
-                processed_waveforms.append(wav)
-            else:
-                processed_waveforms.append(w)
+            # Utilize the resolve helper from the inner encoder
+            wav, _, dur = self.encoder._resolve_audio(w, sr)
+            processed_waveforms.append(wav.squeeze(0))
+            original_durations.append(dur[0])
+            
         waveforms = processed_waveforms
         
         if not torch.cuda.is_available():
@@ -147,7 +147,8 @@ class PipelinedEncoder:
             return self._encode_sequential(waveforms, sr, batch_size)
         
         # Prepare batches
-        batches = self._prepare_batches(waveforms, batch_size)
+        # We need to pass durations along with the batch
+        batches = self._prepare_batches(waveforms, original_durations, batch_size)
         results = [None] * len(waveforms)
         
         # Pipeline state
@@ -170,7 +171,7 @@ class PipelinedEncoder:
                 global_ssl = self.encoder._process_ssl_features(all_ssl, [1, 2, 3, 4])
                 
                 # Store for next stage
-                ssl_features_queue.append((batch_idx, batch_indices, local_ssl, global_ssl))
+                ssl_features_queue.append((batch_idx, batch_indices, batch_durs, local_ssl, global_ssl))
             
             # Stage 2: Encoder processing (Stream 2)
             # Process previous batch while WavLM is working on current batch
@@ -191,10 +192,12 @@ class PipelinedEncoder:
         self,
         ssl_features_data: Tuple,
         results: List,
-        amp_ctx: object # Pass amp_ctx from encode_batch_pipelined
+        amp_ctx: object,
+        enforce_token_count: bool = True,
+        safety_dur: float = 0.3
     ):
         """Process encoder stage on Stream 2."""
-        batch_idx, batch_indices, local_ssl, global_ssl = ssl_features_data
+        batch_idx, batch_indices, batch_durs, local_ssl, global_ssl = ssl_features_data
         
         with torch.cuda.stream(self.stream_encoder), amp_ctx:
             # Encode through transformer
@@ -214,34 +217,45 @@ class PipelinedEncoder:
             # Global embedding
             global_emb = self.encoder.global_encoder(global_ssl)
             
-            # Store results
-            for i, orig_idx in enumerate(batch_indices):
-                results[orig_idx] = (indices[i], global_emb[i])
+            # Store results with per-sample truncation
+            indices = indices.squeeze(1) # [B, T]
+            global_emb = global_emb.squeeze(0)
+            
+            for b in range(indices.shape[0]):
+                orig_idx = batch_indices[b]
+                sample_indices = indices[b]
+                
+                if enforce_token_count:
+                    expected_tokens = int((batch_durs[b].item() + safety_dur) * 25)
+                    if len(sample_indices) > expected_tokens:
+                        sample_indices = sample_indices[:expected_tokens]
+                
+                results[orig_idx] = (sample_indices, global_emb[b])
     
     def _prepare_batches(
         self,
         waveforms: List[torch.Tensor],
+        durations: List[torch.Tensor],
         batch_size: int
-    ) -> List[Tuple[List[int], torch.Tensor]]:
-        """Prepare batched and padded waveforms."""
+    ) -> List[Tuple[List[int], torch.Tensor, torch.Tensor]]:
+        """Group waveforms into batches by length for efficiency."""
         import torch.nn.functional as F
         
-        # Sort by length for efficient batching
-        sorted_wavs = sorted(enumerate(waveforms), key=lambda x: x[1].shape[-1])
+        indexed_data = list(zip(range(len(waveforms)), waveforms, durations))
+        sorted_wavs = sorted(indexed_data, key=lambda x: x[1].shape[-1])
         
         batches = []
         for i in range(0, len(sorted_wavs), batch_size):
-            batch = sorted_wavs[i:i+batch_size]
-            indices, wavs = zip(*batch)
+            chunk = sorted_wavs[i:i+batch_size]
+            indices, wavs, durs = zip(*chunk)
             
-            # Pad to same length
             max_len = max(w.shape[-1] for w in wavs)
-            padded = torch.stack([
-                F.pad(w, (0, max_len - w.shape[-1])) for w in wavs
-            ]).to(self.device)
+            padded = torch.stack([F.pad(w, (0, max_len - w.shape[-1])) for w in wavs]).to(self.device)
             
-            batches.append((list(indices), padded))
-        
+            # Pad durations tensor as well
+            batch_durs = torch.stack(durs)
+            
+            batches.append((list(indices), padded, batch_durs))
         return batches
     
     def _encode_sequential(

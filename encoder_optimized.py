@@ -204,12 +204,17 @@ class OptimizedStandaloneEncoder(nn.Module):
         """
         self.ensure_ssl_extractor()
         
-        # Calculate audio duration for token enforcement
-        audio_duration = waveform.shape[-1] / sr if waveform.dim() == 1 else waveform.shape[1] / sr
-        
-        # Handle batching
+        # Handle string path or numpy array
+        if isinstance(waveform, str):
+            waveform, sr = torchaudio.load(waveform)
+        elif isinstance(waveform, np.ndarray):
+            waveform = torch.from_numpy(waveform).float()
+            
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
+            
+        # Calculate audio duration for token enforcement
+        audio_duration = waveform.shape[-1] / sr
         
         # Move to device
         waveform = waveform.to(self.device)

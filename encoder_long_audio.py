@@ -170,7 +170,17 @@ class LongAudioEncoder:
         Returns:
             (all_tokens, merged_global_embedding)
         """
-        audio_duration = len(waveform) / sr
+        # Handle string path or numpy array
+        if isinstance(waveform, str):
+            import torchaudio
+            waveform, sr = torchaudio.load(waveform)
+        elif isinstance(waveform, np.ndarray):
+            waveform = torch.from_numpy(waveform).float()
+            
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+            
+        audio_duration = waveform.shape[-1] / sr
         
         # Short audio - use direct encoding
         if audio_duration <= self.chunk_duration:

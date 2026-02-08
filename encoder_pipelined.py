@@ -127,6 +127,17 @@ class PipelinedEncoder:
         Returns:
             List of (tokens, global_embedding) tuples
         """
+        # Resolve paths if provided
+        processed_waveforms = []
+        for w in waveforms:
+            if isinstance(w, str):
+                import torchaudio
+                wav, _ = torchaudio.load(w)
+                processed_waveforms.append(wav)
+            else:
+                processed_waveforms.append(w)
+        waveforms = processed_waveforms
+        
         if not torch.cuda.is_available():
             # Fallback to sequential processing
             return self._encode_sequential(waveforms, sr, batch_size)

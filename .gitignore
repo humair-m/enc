@@ -1,0 +1,6 @@
+*.safetensors
+*.onnx
+*.pth
+*.wav
+__pycache__/
+

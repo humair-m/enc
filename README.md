@@ -15,26 +15,43 @@ A high-performance, GPU-optimized audio encoder package for Bitwav TTS. This pac
 
 ## 📦 Installation
 
-This package is designed to be used within the Bitwav ecosystem.
-
+### Option 1: Direct Pip Install (Recommended)
+You can install the package directly from GitHub:
 ```bash
-cd inference/enc
+pip install git+https://github.com/humair-m/enc.git
+```
+
+### Option 2: Clone and Install
+```bash
+git clone https://github.com/humair-m/enc.git
+cd enc
 pip install -e .
 ```
 
 ## 🛠 Usage
 
-### Basic Usage
+### 1. Putting Audio (Inputs)
+The `encode` method is flexible and accepts multiple input formats:
+
+- **File Path**: Just pass the string path to your `.wav` file.
+- **Torch Tensor**: A tensor of shape `(channels, samples)` or `(samples,)`.
+- **Numpy Array**: A numpy array of the audio waveform.
+
+### 2. Basic Example
 
 ```python
 from enc import create_standalone_encoder
+import torchaudio
 
-# Automatically resolves weights (local or HF)
+# 1. Initialize (Downloads weights automatically if needed)
 encoder = create_standalone_encoder(device="cuda")
 
-# Encode audio
-tokens, style_emb = encoder.encode("audio.wav")
-print(f"Tokens: {tokens.shape}, Style: {style_emb.shape}")
+# 2. Encode from File Path
+tokens, style = encoder.encode("path/to/audio.wav")
+
+# 3. Encode from Tensor (e.g., already loaded)
+waveform, sr = torchaudio.load("audio.wav")
+tokens, style = encoder.encode(waveform, sr=sr)
 ```
 
 ### High-Performance (Optimized)

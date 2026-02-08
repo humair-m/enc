@@ -1,3 +1,5 @@
+__version__ = "0.1.6"
+
 from .encoder_standalone import (
     create_standalone_encoder, 
     StandaloneEncoder,

@@ -81,12 +81,13 @@ def ensure_wavlm_path(idx: str = None):
 # Utils & RoPE
 # -----------------------------------------------------------------------------
 
+@torch._dynamo.disable
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, device="cpu"):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=device, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+    return freqs_cis.clone()
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
@@ -171,15 +172,18 @@ class Transformer(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([TransformerBlock(dim, n_heads, 256, window_size) for _ in range(n_layers)])
         self.norm = nn.LayerNorm(dim, eps=1e-5)
-        self.freqs_cis = None # Computed on first forward
+        # Precompute frequencies for RoPE
+        self.register_buffer("freqs_cis", precompute_freqs_cis(dim // n_heads, max_seq_len), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bsz, seqlen, dim = x.shape
-        if self.freqs_cis is None or self.freqs_cis.shape[0] < seqlen:
-            self.freqs_cis = precompute_freqs_cis(dim // self.layers[0].attention.n_heads, seqlen, device=x.device)
+        # Use precomputed buffer
+        if seqlen > self.freqs_cis.shape[0]:
+            # Fallback for unexpected lengths (will trigger graph break)
+            freqs_cis_step = precompute_freqs_cis(dim // self.layers[0].attention.n_heads, seqlen, device=x.device)
+        else:
+            freqs_cis_step = self.freqs_cis[:seqlen]
             
-        freqs_cis_step = self.freqs_cis[:seqlen]
-        
         for layer in self.layers:
             x = layer(x, freqs_cis_step)
             

@@ -155,7 +155,7 @@ class PipelinedEncoder:
         ssl_features_queue = []
         amp_ctx = torch.autocast(device_type='cuda', dtype=self.dtype) if torch.cuda.is_available() else nullcontext()
         
-        for batch_idx, (batch_indices, padded_batch) in enumerate(batches):
+        for batch_idx, (batch_indices, padded_batch, batch_durs) in enumerate(batches):
             # Stage 1: WavLM feature extraction (Stream 1)
             with torch.cuda.stream(self.stream_wavlm), amp_ctx:
                 waveform_ssl = self._resample_for_ssl(padded_batch, sr)

@@ -86,8 +86,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, device="cpu
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=device, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis.clone()
+    # Return as real tensor with cos and sin components [end, dim//2, 2]
+    cos = torch.cos(freqs)
+    sin = torch.sin(freqs)
+    return torch.stack([cos, sin], dim=-1)
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
@@ -97,10 +99,25 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     return freqs_cis.view(*shape)
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, x_)
-    x_out = torch.view_as_real(x_ * freqs_cis).flatten(3)
-    return x_out.type_as(x)
+    # x: [B, T, H, D]
+    # freqs_cis: [T, D//2, 2]
+    # Reimplement using real-valued operations for torch.compile compatibility
+    x_shape = x.shape
+    x = x.view(*x_shape[:-1], -1, 2) # [B, T, H, D//2, 2]
+    
+    # cos: freqs_cis[..., 0], sin: freqs_cis[..., 1]
+    cos = freqs_cis[:, None, :, 0] # [T, 1, D//2]
+    sin = freqs_cis[:, None, :, 1] # [T, 1, D//2]
+    
+    # Complex multiplication (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+    x_real = x[..., 0]
+    x_imag = x[..., 1]
+    
+    out_real = x_real * cos - x_imag * sin
+    out_imag = x_real * sin + x_imag * cos
+    
+    out = torch.stack([out_real, out_imag], dim=-1)
+    return out.view(*x_shape).type_as(x)
 
 # -----------------------------------------------------------------------------
 # Transformer Modules

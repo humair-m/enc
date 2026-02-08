@@ -412,10 +412,34 @@ class StandaloneEncoder(nn.Module):
         std = torch.std(features, dim=1, keepdim=True)   # (B, 1, C)
         return (features - mean) / (std + eps)
 
+    def _resolve_audio(self, waveform: Union[torch.Tensor, np.ndarray, str, bytes], sr: int) -> Tuple[torch.Tensor, int]:
+        """Resolve various audio input types to a torch Tensor."""
+        if isinstance(waveform, bytes):
+            import io
+            import soundfile as sf
+            arr, native_sr = sf.read(io.BytesIO(waveform))
+            waveform = torch.from_numpy(arr).float()
+            sr = native_sr
+        elif isinstance(waveform, str):
+            waveform, sr = torchaudio.load(waveform)
+        elif isinstance(waveform, np.ndarray):
+            waveform = torch.from_numpy(waveform).float()
+            
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+        elif waveform.dim() > 2:
+            waveform = waveform.view(-1, waveform.shape[-1])
+            
+        # Convert to mono if multi-channel
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+            
+        return waveform, sr
+
     @torch.inference_mode()
     def encode(
         self, 
-        waveform: torch.Tensor, 
+        waveform: Union[torch.Tensor, np.ndarray, str, bytes], 
         sr: int = 24000,
         enforce_token_count: bool = True,
         safety_dur: float = 0.3
@@ -424,7 +448,7 @@ class StandaloneEncoder(nn.Module):
         Encode audio to tokens and global embedding.
         
         Args:
-            waveform: Audio tensor (samples,) or (batch, samples)
+            waveform: Audio tensor (samples,), (batch, samples), path, numpy array, or bytes
             sr: Sample rate
             enforce_token_count: If True, truncate tokens to expected count based on duration
             safety_dur: Safety margin in seconds when enforcing token count (default: 0.3s)
@@ -434,15 +458,9 @@ class StandaloneEncoder(nn.Module):
         """
         self.ensure_ssl_extractor()
         
-        # Handle string path or numpy array
-        if isinstance(waveform, str):
-            waveform, sr = torchaudio.load(waveform)
-        elif isinstance(waveform, np.ndarray):
-            waveform = torch.from_numpy(waveform).float()
-            
-        if waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)
-            
+        # Resolve audio to tensor
+        waveform, sr = self._resolve_audio(waveform, sr)
+        
         # Calculate audio duration for token enforcement
         audio_duration = waveform.shape[-1] / sr
         

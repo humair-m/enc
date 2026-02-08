@@ -25,14 +25,12 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 from encoder_standalone import (
-    precompute_freqs_cis, reshape_for_broadcast, apply_rotary_emb,
-    Attention, FeedForward, TransformerBlock, Transformer,
-    ConvNeXtBlock, GlobalEncoder, FSQ, FiniteScalarQuantizer,
+    StandaloneEncoder, Transformer, FiniteScalarQuantizer, GlobalEncoder,
     ensure_weights_path, ensure_wavlm_path
 )
 
 
-class OptimizedStandaloneEncoder(nn.Module):
+class OptimizedStandaloneEncoder(StandaloneEncoder):
     """GPU-optimized encoder with torch.compile support."""
     
     def __init__(
@@ -44,12 +42,10 @@ class OptimizedStandaloneEncoder(nn.Module):
         use_cudagraphs: bool = False,
         dynamic_shapes: bool = True
     ):
-        super().__init__()
-        self.device = device
-        self.dtype = dtype
-        self.use_compile = use_compile
-        self.use_cudagraphs = use_cudagraphs
+        super().__init__(device=device)
         self.compile_mode = compile_mode
+        self.use_compile = use_compile
+        self.dtype = dtype
         self.dynamic_shapes = dynamic_shapes
         
         # Core components (will be initialized on weight load)
@@ -211,15 +207,9 @@ class OptimizedStandaloneEncoder(nn.Module):
         """
         self.ensure_ssl_extractor()
         
-        # Handle string path or numpy array
-        if isinstance(waveform, str):
-            waveform, sr = torchaudio.load(waveform)
-        elif isinstance(waveform, np.ndarray):
-            waveform = torch.from_numpy(waveform).float()
-            
-        if waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)
-            
+        # Resolve audio to tensor
+        waveform, sr = self._resolve_audio(waveform, sr)
+        
         # Calculate audio duration for token enforcement
         audio_duration = waveform.shape[-1] / sr
         
@@ -281,26 +271,34 @@ class OptimizedStandaloneEncoder(nn.Module):
     @torch.inference_mode()
     def encode_batch(
         self,
-        waveforms: List[torch.Tensor],
+        waveforms: List[Union[torch.Tensor, str, np.ndarray, bytes]],
         sr: int = 24000,
+        batch_size: int = 8,
         use_amp: bool = True
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Batch encode multiple audio samples (with dynamic batching).
         
         Args:
-            waveforms: List of audio tensors
+            waveforms: List of audio inputs (paths, tensors, arrays, or bytes)
             sr: Sample rate
+            batch_size: GPU batch size
             use_amp: Use automatic mixed precision
             
         Returns:
             List of (tokens, global_embedding) tuples
         """
+        # Resolve all inputs to tensors first
+        resolved_waveforms = []
+        for w in waveforms:
+            # We don't resample yet, just resolve to tensors
+            wav, _ = self._resolve_audio(w, sr)
+            resolved_waveforms.append(wav.squeeze(0))
+        
         # Group by similar lengths for efficient batching
-        sorted_wavs = sorted(enumerate(waveforms), key=lambda x: x[1].shape[-1])
+        sorted_wavs = sorted(enumerate(resolved_waveforms), key=lambda x: x[1].shape[-1])
         
         results = [None] * len(waveforms)
-        batch_size = 8  # Adjust based on GPU memory
         
         for i in range(0, len(sorted_wavs), batch_size):
             batch = sorted_wavs[i:i+batch_size]

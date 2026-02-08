@@ -221,7 +221,7 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         target_sr = 16000
         if sr != target_sr:
             if self._resampler is None or self._resampler_sr != sr:
-                self._resampler = torchaudio.transforms.Resample(sr, target_sr).to(self.device)
+                self._resampler = torchaudio.transforms.Resample(sr, target_sr).to(self.device).to(self.dtype)
                 self._resampler_sr = sr
             waveform_ssl = self._resampler(waveform)
         else:

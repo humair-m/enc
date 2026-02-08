@@ -108,7 +108,7 @@ class PipelinedEncoder:
         if sr != target_sr:
             if self.encoder._resampler is None or self.encoder._resampler_sr != sr:
                 import torchaudio
-                self.encoder._resampler = torchaudio.transforms.Resample(sr, target_sr).to(self.device)
+                self.encoder._resampler = torchaudio.transforms.Resample(sr, target_sr).to(self.device).to(self.dtype)
                 self.encoder._resampler_sr = sr
             return self.encoder._resampler(waveform).to(self.dtype)
         return waveform.to(self.dtype)

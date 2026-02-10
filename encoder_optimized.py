@@ -335,6 +335,13 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             # Encode batch
             tokens_batch, global_batch = self.encode(padded, sr=sr, use_amp=use_amp, durations=dur_tensor)
             
+            # Robust batch handling: ensure results are always indexable lists/tensors
+            # This prevents "len() of a 0-d tensor" error when batch_size=1
+            if not isinstance(tokens_batch, (list, tuple)):
+                tokens_batch = [tokens_batch]
+            if global_batch.ndim == 1:
+                global_batch = global_batch.unsqueeze(0)
+            
             # Store results
             for j, orig_idx in enumerate(original_indices):
                 results[orig_idx] = (tokens_batch[j], global_batch[j])

@@ -219,7 +219,13 @@ class PipelinedEncoder:
             
             # Store results with per-sample truncation
             indices = indices.squeeze(1) # [B, T]
-            global_emb = global_emb.squeeze(0)
+            
+            # Robust batch handling: ensure results are always indexable 2D tensors
+            # This prevents "len() of a 0-d tensor" error when batch_size=1
+            if indices.ndim == 1:
+                indices = indices.unsqueeze(0)
+            if global_emb.ndim == 1:
+                global_emb = global_emb.unsqueeze(0)
             
             for b in range(indices.shape[0]):
                 orig_idx = batch_indices[b]

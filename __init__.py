@@ -1,4 +1,4 @@
-__version__ = "0.2.7exp"
+__version__ = "0.2.10"
 
 from .encoder_standalone import (
     create_standalone_encoder, 

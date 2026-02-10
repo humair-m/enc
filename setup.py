@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="enc",
-    version="0.2.7exp",
+    version="0.2.10",
     packages=find_packages(),
     install_requires=[
         "torch",

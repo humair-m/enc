@@ -367,7 +367,8 @@ def create_optimized_encoder(
     compile_mode: str = "max-autotune",
     dtype: torch.dtype = torch.float16,
     warmup: bool = True,
-    dynamic_shapes: bool = True
+    dynamic_shapes: bool = True,
+    compile: bool = True
 ) -> OptimizedStandaloneEncoder:
     """
     Factory function to create and initialize optimized encoder.
@@ -379,6 +380,7 @@ def create_optimized_encoder(
         dtype: Data type for inference
         warmup: Run warmup iterations
         dynamic_shapes: Whether to allow dynamic sequence lengths without re-compilation
+        compile: Whether to use torch.compile (default: True, if CUDA available)
         
     Returns:
         Initialized encoder
@@ -388,7 +390,7 @@ def create_optimized_encoder(
     encoder = OptimizedStandaloneEncoder(
         device=device,
         compile_mode=compile_mode,
-        use_compile=torch.cuda.is_available(),
+        use_compile=compile and torch.cuda.is_available(),
         dtype=dtype,
         dynamic_shapes=dynamic_shapes
     )

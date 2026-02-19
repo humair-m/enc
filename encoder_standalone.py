@@ -415,13 +415,15 @@ class StandaloneEncoder(nn.Module):
     def _resolve_audio(self, waveform: Union[torch.Tensor, np.ndarray, str, bytes, List[Any]], sr: int) -> Tuple[torch.Tensor, int, torch.Tensor]:
         """Resolve various audio input types to a torch Tensor (Batch, Time) and a Tensor of durations."""
         if isinstance(waveform, list):
-            # If it's a list, we assume they are already resolved or need resolving individually
-            # This is handled by high-level encode_batch, but for standard encode we might get a list
-            # We'll just convert everything in the list to tensors and pad
-            resolved = [self._resolve_audio(w, sr)[0] for w in waveform]
-            durations = torch.tensor([w.shape[-1] / sr for w in resolved])
-            max_len = max(w.shape[-1] for w in resolved)
-            padded = torch.stack([F.pad(w, (0, max_len - w.shape[-1])) for w in resolved]).squeeze(1)
+            # Resolve each item individually and pad
+            resolved_items = []
+            for w in waveform:
+                wav, _, _ = self._resolve_audio(w, sr)
+                resolved_items.append(wav.squeeze(0))
+            
+            durations = torch.tensor([w.shape[-1] / sr for w in resolved_items], dtype=torch.float32)
+            max_len = max(w.shape[-1] for w in resolved_items)
+            padded = torch.stack([F.pad(w, (0, max_len - w.shape[-1])) for w in resolved_items])
             return padded, sr, durations
 
         if isinstance(waveform, bytes):
@@ -430,25 +432,26 @@ class StandaloneEncoder(nn.Module):
             arr, native_sr = sf.read(io.BytesIO(waveform))
             waveform = torch.from_numpy(arr).float()
             sr = native_sr
+            if waveform.ndim == 2:
+                waveform = waveform.t()  # Transpose (Samples, Channels) -> (Channels, Samples)
         elif isinstance(waveform, str):
             waveform, sr = torchaudio.load(waveform)
         elif isinstance(waveform, np.ndarray):
             waveform = torch.from_numpy(waveform).float()
-            
+            if waveform.ndim == 2 and waveform.shape[1] < waveform.shape[0] and waveform.shape[1] <= 2:
+                waveform = waveform.t()
+        
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
         elif waveform.dim() > 2:
             waveform = waveform.view(-1, waveform.shape[-1])
             
-        # Convert to mono if multi-channel
-        if waveform.shape[0] > 1 and not isinstance(waveform, torch.Tensor): 
-            # This logic is slightly flawed for batches, but for single audio:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        elif waveform.dim() == 2 and waveform.shape[0] > 1 and waveform.shape[0] <= 2:
-            # Likely stereo
+        # Convert multi-channel to mono
+        if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
             
-        durations = torch.tensor([waveform.shape[-1] / sr] * waveform.shape[0])
+        # Ensure it's (1, Samples)
+        durations = torch.tensor([waveform.shape[-1] / sr], dtype=torch.float32)
         return waveform, sr, durations
 
     @torch.inference_mode()

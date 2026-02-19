@@ -40,11 +40,12 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         use_compile: bool = True,
         dtype: torch.dtype = torch.float16,
         use_cudagraphs: bool = False,
-        dynamic_shapes: bool = True
+        dynamic_shapes: bool = True,
+        compile_models: bool = True
     ):
         super().__init__(device=device)
         self.compile_mode = compile_mode
-        self.use_compile = use_compile
+        self.use_compile = use_compile and compile_models
         self.dtype = dtype
         self.dynamic_shapes = dynamic_shapes
         
@@ -371,7 +372,8 @@ def create_optimized_encoder(
     compile_mode: str = "max-autotune",
     dtype: torch.dtype = torch.float16,
     warmup: bool = True,
-    dynamic_shapes: bool = True
+    dynamic_shapes: bool = True,
+    compile_models: bool = True
 ) -> OptimizedStandaloneEncoder:
     """
     Factory function to create and initialize optimized encoder.
@@ -383,6 +385,7 @@ def create_optimized_encoder(
         dtype: Data type for inference
         warmup: Run warmup iterations
         dynamic_shapes: Whether to allow dynamic sequence lengths without re-compilation
+        compile_models: Whether to use torch.compile
         
     Returns:
         Initialized encoder
@@ -394,7 +397,8 @@ def create_optimized_encoder(
         compile_mode=compile_mode,
         use_compile=torch.cuda.is_available(),
         dtype=dtype,
-        dynamic_shapes=dynamic_shapes
+        dynamic_shapes=dynamic_shapes,
+        compile_models=compile_models
     )
     
     encoder.load_weights(weights_path)

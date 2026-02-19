@@ -228,6 +228,10 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         else:
             waveform_ssl = waveform
         
+        # Ensure contiguous memory for torch.compile
+        if not waveform_ssl.is_contiguous():
+            waveform_ssl = waveform_ssl.contiguous()
+    
         # Use AMP context
         amp_ctx = torch.autocast(device_type='cuda', dtype=self.dtype) if use_amp and torch.cuda.is_available() else nullcontext()
         

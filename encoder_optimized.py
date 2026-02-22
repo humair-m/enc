@@ -96,9 +96,11 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             dim=384, intermediate_dim=1152, num_layers=2
         ).to(self.device).to(self.dtype)
 
-        self.conv_downsample = nn.Conv1d(768, 768, kernel_size=2, stride=2).to(self.device).to(self.dtype)
+        self.conv_downsample = nn.Conv1d(
+            768, 768, kernel_size=2, stride=2
+        ).to(self.device).to(self.dtype)
 
-        # Load state dict
+        # Load state dict per component
         self.local_encoder.load_state_dict(
             {k[14:]: v for k, v in cleaned_dict.items() if k.startswith("local_encoder.")},
             strict=False
@@ -116,12 +118,15 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             strict=False
         )
 
-        missing = len([k for k in cleaned_dict if not any(k.startswith(p) for p in
-                      ["local_encoder.", "local_quantizer.", "global_encoder.", "conv_downsample."])])
-
+        missing = len([
+            k for k in cleaned_dict
+            if not any(k.startswith(p) for p in [
+                "local_encoder.", "local_quantizer.",
+                "global_encoder.", "conv_downsample."
+            ])
+        ])
         print(f"[+] Loaded weights. Missing: 0, Extra: {missing}")
 
-        # Set to eval mode
         self.eval()
 
         # Compile models if requested
@@ -132,7 +137,6 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         """Compile encoder components with torch.compile."""
         print(f"[*] Compiling models with mode='{self.compile_mode}'...")
 
-        # Compile local encoder (transformer)
         self._compiled_encoder = torch.compile(
             self.local_encoder,
             mode=self.compile_mode,
@@ -149,7 +153,6 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
 
         print("[*] Loading SSL feature extractor (wavlm_base_plus)...")
         wavlm_path = ensure_wavlm_path()
-
         bundle = pipelines.WAVLM_BASE_PLUS
 
         if wavlm_path:
@@ -176,11 +179,11 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
 
     def _process_ssl_features(self, features: List[torch.Tensor], layers: List[int]) -> torch.Tensor:
         """Average specified SSL layers."""
-        selected = torch.stack([features[i-1] for i in layers], dim=0)
+        selected = torch.stack([features[i - 1] for i in layers], dim=0)
         return selected.mean(dim=0)
 
     def _normalize_ssl_features(self, features: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-        """Normalize SSL features."""
+        """Normalize SSL features across time."""
         mean = features.mean(dim=1, keepdim=True)
         std = features.std(dim=1, keepdim=True)
         return (features - mean) / (std + eps)
@@ -199,14 +202,16 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         Encode audio to tokens and global embedding.
 
         Args:
-            waveform: Audio tensor (samples,), (batch, samples), path, numpy array, or bytes
+            waveform: Audio tensor (samples,), (batch, samples), path,
+                      numpy array, bytes, or list of any of the above
             sr: Sample rate
-            enforce_token_count: If True, truncate tokens to expected count based on duration
-            safety_dur: Safety margin in seconds when enforcing token count (default: 0.3s)
-            durations: Optional tensor of original durations for each sample in batch
+            enforce_token_count: Truncate tokens to expected count based on duration
+            safety_dur: Safety margin in seconds when enforcing token count
+            durations: Optional tensor of original durations per sample in batch
+            use_amp: Use automatic mixed precision on CUDA
 
         Returns:
-            (tokens, global_embedding) - Tensors (or lists of tensors if batch)
+            (tokens, global_embedding) — tensors or lists of tensors for batches
         """
         self.ensure_ssl_extractor()
 
@@ -220,22 +225,27 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         durations = durations.to(self.device)
         is_batch = waveform.shape[0] > 1
 
-        # Resample to 16kHz for SSL
+        # Resample to 16 kHz (SSL model requirement)
         target_sr = 16000
         if sr != target_sr:
             if self._resampler is None or self._resampler_sr != sr:
-                self._resampler = torchaudio.transforms.Resample(sr, target_sr).to(self.device).to(self.dtype)
+                self._resampler = torchaudio.transforms.Resample(
+                    sr, target_sr
+                ).to(self.device).to(self.dtype)
                 self._resampler_sr = sr
             waveform_ssl = self._resampler(waveform)
         else:
             waveform_ssl = waveform
 
-        # Ensure contiguous memory for torch.compile
         if not waveform_ssl.is_contiguous():
             waveform_ssl = waveform_ssl.contiguous()
 
-        # Use AMP context
-        amp_ctx = torch.autocast(device_type='cuda', dtype=self.dtype) if use_amp and torch.cuda.is_available() else nullcontext()
+        # AMP context
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=self.dtype)
+            if use_amp and torch.cuda.is_available()
+            else nullcontext()
+        )
 
         with amp_ctx:
             # Extract SSL features
@@ -244,22 +254,25 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             else:
                 all_ssl, _ = self.ssl_model.extract_features(waveform_ssl)
 
-            # Process features
+            # Local: layers 6 & 9
             local_ssl = self._process_ssl_features(all_ssl, [6, 9])
             local_ssl = self._normalize_ssl_features(local_ssl)
 
+            # Global: layers 1–4
             global_ssl = self._process_ssl_features(all_ssl, [1, 2, 3, 4])
 
-            # Encode through transformer
+            # Transformer encode
             if self._compiled_encoder is not None:
                 encoded = self._compiled_encoder(local_ssl)
             else:
                 encoded = self.local_encoder(local_ssl)
 
-            # Downsample
-            downsampled = self.conv_downsample(encoded.transpose(1, 2)).transpose(1, 2)
+            # Temporal downsample (factor 2)
+            downsampled = self.conv_downsample(
+                encoded.transpose(1, 2)
+            ).transpose(1, 2)
 
-            # Quantize
+            # FSQ quantize
             _, indices = self.local_quantizer.encode(downsampled)
 
             # Global embedding
@@ -267,7 +280,7 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
 
         indices = indices.squeeze(1)  # [B, T]
 
-        # Enforce token count to prevent silence artifacts (per sample in batch)
+        # Enforce token count to prevent silence artifacts
         if enforce_token_count:
             final_indices = []
             for b in range(indices.shape[0]):
@@ -296,7 +309,7 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         use_amp: bool = True
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Batch encode multiple audio samples (with dynamic batching).
+        Batch encode multiple audio samples with dynamic batching.
 
         Args:
             waveforms: List of audio inputs (paths, tensors, arrays, or bytes)
@@ -305,18 +318,22 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             use_amp: Use automatic mixed precision
 
         Returns:
-            List of (tokens, global_embedding) tuples
+            List of (tokens, global_embedding) tuples in original input order
         """
-        # Resolve all inputs to tensors first
+        # Resolve each waveform individually to a 1-D tensor
         resolved_waveforms = []
         original_durations = []
         for w in waveforms:
             wav, _, dur = self._resolve_audio(w, sr)
-            resolved_waveforms.append(wav.squeeze(0))
+            resolved_waveforms.append(wav.squeeze(0))   # [samples]
             original_durations.append(dur[0])
 
-        # Sort by length for efficient batching (reduces padding waste)
-        indexed_data = list(zip(range(len(resolved_waveforms)), resolved_waveforms, original_durations))
+        # Sort by length for efficient padding (reduces wasted compute)
+        indexed_data = list(zip(
+            range(len(resolved_waveforms)),
+            resolved_waveforms,
+            original_durations
+        ))
         sorted_wavs = sorted(indexed_data, key=lambda x: x[1].shape[-1])
 
         results = [None] * len(waveforms)
@@ -325,25 +342,31 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
             batch = sorted_wavs[i:i + batch_size]
             original_indices, batch_wavs, batch_durs = zip(*batch)
 
-            # Pad to same length within mini-batch
-            max_len = max(w.shape[-1] for w in batch_wavs)
-            padded = torch.stack([
-                F.pad(w, (0, max_len - w.shape[-1])) for w in batch_wavs
-            ])
+            dur_tensor = torch.stack(list(batch_durs))
 
-            # Convert durations to tensor
-            dur_tensor = torch.stack(batch_durs)
-
-            # Encode mini-batch
+            # -----------------------------------------------------------
+            # ROOT-CAUSE FIX
+            #
+            # BUG: stacking waveforms into a tensor [N, samples] and
+            # passing it to encode() causes _resolve_audio to see
+            # waveform.shape[0] == N > 1 and treat N as audio *channels*,
+            # averaging the whole batch down to a single mono sample.
+            # encode() then returns a bare tensor (not a list), so
+            # tokens_batch[j] raises IndexError for every j >= 1.
+            #
+            # FIX: pass waveforms as a Python list so _resolve_audio takes
+            # the list branch — it processes each item independently and
+            # pads them into a correct [B, T] batch internally.
+            # -----------------------------------------------------------
             tokens_batch, global_batch = self.encode(
-                padded, sr=sr, use_amp=use_amp, durations=dur_tensor
+                list(batch_wavs),   # <-- list, NOT a stacked tensor
+                sr=sr,
+                use_amp=use_amp,
+                durations=dur_tensor
             )
 
-            # -------------------------------------------------------
-            # FIX: encode() returns a single tensor (not a list) when
-            # the batch size is 1 (is_batch = waveform.shape[0] > 1).
-            # Guard here so indexing with [j] always works correctly.
-            # -------------------------------------------------------
+            # Secondary guard: if mini-batch has exactly 1 sample,
+            # encode() still returns a bare tensor instead of a list.
             if not isinstance(tokens_batch, (list, tuple)):
                 tokens_batch = [tokens_batch]
             if global_batch.ndim == 1:
@@ -355,11 +378,11 @@ class OptimizedStandaloneEncoder(StandaloneEncoder):
         return results
 
     def warmup(self, num_iterations: int = 3, audio_length: int = 24000 * 5):
-        """Warmup for torch.compile optimization."""
+        """Warmup torch.compile by running dummy inferences."""
         print(f"[*] Warming up with {num_iterations} iterations...")
         dummy = torch.randn(audio_length).to(self.device)
 
-        for i in range(num_iterations):
+        for _ in range(num_iterations):
             self.encode(dummy)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -377,19 +400,20 @@ def create_optimized_encoder(
     compile_models: bool = True
 ) -> OptimizedStandaloneEncoder:
     """
-    Factory function to create and initialize optimized encoder.
+    Factory function to create and initialize the optimized encoder.
 
     Args:
-        weights_path: Path to encoder weights (default: encoder.safetensors in same dir)
-        device: Device to use
-        compile_mode: torch.compile mode ("default", "reduce-overhead", "max-autotune")
-        dtype: Data type for inference
-        warmup: Run warmup iterations
-        dynamic_shapes: Whether to allow dynamic sequence lengths without re-compilation
-        compile_models: Whether to use torch.compile
+        weights_path:   Path to encoder weights (auto-resolved if None)
+        device:         Torch device string
+        compile_mode:   torch.compile mode
+                        ("default" | "reduce-overhead" | "max-autotune")
+        dtype:          Inference dtype (torch.float16 or torch.bfloat16)
+        warmup:         Run warmup iterations after loading
+        dynamic_shapes: Allow dynamic sequence lengths without recompilation
+        compile_models: Enable torch.compile
 
     Returns:
-        Initialized encoder
+        Initialized OptimizedStandaloneEncoder
     """
     weights_path = ensure_weights_path(weights_path)
 
@@ -413,6 +437,7 @@ def create_optimized_encoder(
 
 if __name__ == "__main__":
     import soundfile as sf
+    import time
 
     encoder = create_optimized_encoder(
         weights_path="encoder.safetensors",
@@ -425,9 +450,7 @@ if __name__ == "__main__":
     audio, sr = sf.read("test_audio/comparison_llama.wav")
     audio_tensor = torch.from_numpy(audio).float()
 
-    import time
     iterations = 10
-
     torch.cuda.synchronize()
     start = time.time()
 
@@ -436,5 +459,5 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
 
     elapsed = time.time() - start
-    print(f"\n[BENCHMARK] Avg latency: {elapsed/iterations:.4f}s")
+    print(f"\n[BENCHMARK] Avg latency: {elapsed / iterations:.4f}s")
     print(f"[BENCHMARK] Tokens: {tokens.shape}, Embedding: {emb.shape}")
